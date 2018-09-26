@@ -6,6 +6,7 @@ from scipy.optimize import minimize
 import bisect
 import math
 import numpy as np
+from matplotlib.pyplot import figure, plot, xlabel, ylabel, title, show
 import random
 
 
@@ -340,16 +341,19 @@ class Corr1(parametricCorrelator):
         self.beta = beta
 
     def getPara(self):
-        return [self.beta]
+        return self.beta
 
     def setPara(self, x):
-        beta = x
+        self.beta = x
 
     def getBound(self):
         return [(0.0, None)]
 
     def corrFun(self, Ti, Tj):
         return math.exp(-self.beta * abs(Ti - Tj))
+
+    def __str__(self):
+        return "rho(i,j) = exp( -beta | T(i) - T(j) |), beta = " + str(self.beta)
 
 
 class Corr2(parametricCorrelator):
@@ -359,7 +363,7 @@ class Corr2(parametricCorrelator):
     """
 
     def __init__(self, beta, rhoInf):
-        assert (beta >= 0 and rhoInf > 0.0 and rhoInf < 1.0)
+        assert (beta >= 0 and 0.0 < rhoInf < 1.0)
         self.beta, self.rhoInf = beta, rhoInf
 
     def getPara(self):
@@ -374,8 +378,17 @@ class Corr2(parametricCorrelator):
     def corrFun(self, Ti, Tj):
         return self.rhoInf + (1 - self.rhoInf) * math.exp(-self.beta * abs(Ti - Tj))
 
+    def __str__(self):
+        return "rho(i,j) = rho(inf) + ( 1 - rho( inf ) ) * exp( -beta | T(i) - T(j) |), beta = " + \
+                str(self.beta) + ", rho(inf) = " + str(self.rhoInf)
+
 
 class corrToBSIV:
+    """corrToBSIV:  a functor class
+            Rebonato's Formula for approximating swaption (swap T0->T) implied Black volatility
+            (IV_T0->T)^2 = sum(w_i*w_j*F_i*F_j*rho(i,j)/(S_T0->T)*integral(T0,T,sigma_i(t)*sigma_j(t)))
+        calling concrete instance by input Correlation Matrix Rho
+    """
     def __init__(self):
         self.__theList = []
 
@@ -419,7 +432,7 @@ class LiborMarketModel(metaclass=ABCMeta):
         assert (isinstance(volCalc, volatility))
         assert (isinstance(corrCalc, correlator))
         # Numeraire forward rate should be one of the forward rates
-        assert (numeraireIndex >= 0 and numeraireIndex < len(iniState))
+        assert (0 <= numeraireIndex < len(iniState))
         # length of Critical Time Point shall equal to len to iniState
         assert (len(criticalTimePoint) == len(iniState) == len(tau))
 
@@ -498,12 +511,19 @@ class LiborMarketModel(metaclass=ABCMeta):
         minimize(self.__errToBSswaptionVol, self.__corr.getPara(), (tarBSVol, ivCalc), method='L-BFGS-B',
                  bounds=self.__corr.getBound())
 
-    def __errToBSswaptionVol(self, corrPara, tarBSVol, ivCalc):
+    def __errToBSswaptionVol(self, corrPara: object, tarBSVol: object, ivCalc: object) -> object:
         self.__corr.setPara(corrPara)
         corrMatrix = self.__corr.get(0.0, self.__ctp)
         return sum([(ele[0] - ele[1](corrMatrix)) ** 2 for ele in zip(tarBSVol, ivCalc)])
 
     def __getIVCalc(self, swaptionIV, zcpPrc):
+        """
+        __getIVCalc
+        :param swaptionIV:  swaption implied volatility
+                            - list [starting time, ending time, Black-Scholes implied volatility]
+        :param zcpPrc:      zero coupon prices for forward times
+        :return:            Rebonato's Formula (an corrToBSIV functor object)
+        """
         T0, Tn, bsIV = swaptionIV
         start = bisect.bisect_left(self.__ctp, T0)  # start is included
         end = bisect.bisect_right(self.__ctp, Tn)  # end is not included
@@ -525,7 +545,7 @@ class LiborMarketModel(metaclass=ABCMeta):
     def getIniState(self):
         return self.__rate0
 
-    def getInd(self):
+    def getNumeraireInd(self):
         return self.__numInd
 
     def getTau(self):
@@ -558,7 +578,7 @@ class ShortJumper(LiborMarketModel):
         curRate, res = self.getIniState(), SimResult()
         res.add(curRate)
 
-        while (curRate.t <= finishTime):
+        while curRate.t <= finishTime:
             drift = self.getDrift(curRate)
 
             mu = self.__dt * (np.array([ele for ele in drift if ele is not None]) - 0.5 * np.square(self.tempVol))
@@ -593,7 +613,7 @@ class PredCorrect(LiborMarketModel):
         curRate, res = self.getIniState(), SimResult()
         res.add(curRate)
 
-        while (curRate.t <= finishTime):
+        while curRate.t <= finishTime:
             drift = self.getDrift(curRate)
 
             zero = np.array([0.0 for ele in drift if ele is not None])
@@ -636,7 +656,7 @@ class IterPredCorrect(LiborMarketModel):
 
     def simulate(self, finishTime):
 
-        tau, numInd, curRate, res = self.getTau(), self.getInd(), self.getIniState(), SimResult()
+        tau, numInd, curRate, res = self.getTau(), self.getNumeraireInd(), self.getIniState(), SimResult()
         res.add(curRate)
 
         while curRate.t <= finishTime:
@@ -687,4 +707,53 @@ print( a.get( 0.3, [0.25*i for i in range( 1, 12 )]))
 """
 
 
+def main():
+    # Number of forwards
+    n = 10
+    # Initial term structure
+    r0 = RateStructure(0.0, [0.005, 0.01, 0.016, 0.02, 0.024, 0.027, 0.03, 0.033, 0.035, 0.037])
+    # Forward rate accrual period length
+    dt = [0.25]*n
+    # Forward ending times
+    ti = dt.copy()
+    for i in range(1, len(ti)):
+        ti[i] = ti[i - 1] + ti[i]
+    numeraireInd = 5
 
+    # Cap (with maturity at ti) implied Black volatility
+    CapVol = [0.38, 0.385, 0.396666667, 0.405, 0.412,
+              0.411666667, 0.408571429, 0.405, 0.398888889, 0.392]
+
+    # Swaption Vols (T0, T, IV)
+    #               T0 - swap starting date
+    #               T  - swap ending date
+    #               IV - implied Black volatility
+    SwaptionVol = [(0.25, 1.0, 0.3), (0.25, 1.25, 0.32),
+                   (0.25, 1.5, 0.33), (0.5, 1.0, 0.31),
+                   (0.5, 1.5, 0.34)]
+
+    # Volatility objects (three parametrizations)
+    vola = vol2([0.2]*n)
+    volb = vol6(0.2, 0.3, 0.4, 0.5)
+    volc = vol7(0.2, 0.3, 0.4, 0.5, [0.2]*n)
+
+    # Correlation objects (two parametrizations)
+    cora = Corr1(0.9)
+    corb = Corr2(0.9, 0.9)
+
+    # Volatility calibration
+    vola.calibrate(CapVol, ti, dt)
+    volb.calibrate(CapVol, ti, dt)
+    volc.calibrate(CapVol, ti, dt)
+
+    # Libor Market Model object
+    testLMM = IterPredCorrect(r0, volc, corb, ti, dt, numeraireInd, 1/365)
+    testLMM.calibrate(CapVol, SwaptionVol)
+    aRes = testLMM.simulate(1.5)
+    print(volc)
+    print(corb)
+    for ele in aRes:
+        print(ele)
+
+if __name__ == '__main__':
+    main()

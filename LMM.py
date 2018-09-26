@@ -6,7 +6,7 @@ from scipy.optimize import minimize
 import bisect
 import math
 import numpy as np
-# import random
+import random
 
 
 class RateStructure:
